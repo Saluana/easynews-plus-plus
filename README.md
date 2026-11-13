@@ -169,7 +169,7 @@ Verify the installation by visiting `http://localhost:1337/` in your browser. To
 
 For direct source installation, ensure you have:
 
-- Node.js 20 or higher
+- Node.js 22.18+, 24.11+, or 26+
 - NPM 7 or higher
 
 ```bash

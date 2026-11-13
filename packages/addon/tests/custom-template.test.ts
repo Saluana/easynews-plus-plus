@@ -53,7 +53,7 @@ describe('Custom Template', () => {
           type: 'select',
           title: 'UI Language',
           default: 'eng',
-          options: { eng: 'English', deu: 'Deutsch' } as unknown as string,
+          options: { eng: 'English', deu: 'Deutsch' } as unknown as string[],
         },
         {
           key: 'strictTitleMatching',
@@ -71,7 +71,7 @@ describe('Custom Template', () => {
             language_first: 'Language First',
             size_first: 'Size First',
             date_first: 'Date First',
-          } as unknown as string,
+          } as unknown as string[],
         },
         {
           key: 'showQualities',
@@ -81,7 +81,7 @@ describe('Custom Template', () => {
           options: {
             '4k,1080p,720p,480p': 'All Qualities',
             '1080p,720p,480p': '1080p and below',
-          } as unknown as string,
+          } as unknown as string[],
         },
         {
           key: 'preferredLanguage',
@@ -92,7 +92,7 @@ describe('Custom Template', () => {
             '': 'No preference',
             eng: 'English',
             deu: 'Deutsch',
-          } as unknown as string,
+          } as unknown as string[],
         },
       ],
     };

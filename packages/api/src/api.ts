@@ -28,7 +28,7 @@ export class EasynewsAPI {
     return JSON.stringify({
       query: options.query,
       pageNr: options.pageNr || 1,
-      maxResults: parseInt(process.env.MAX_RESULTS_PER_PAGE || '250'),
+      maxResults: options.maxResults ?? parseInt(process.env.MAX_RESULTS_PER_PAGE || '250'),
       sort1: options.sort1 || 'dsize',
       sort1Direction: options.sort1Direction || '-',
       sort2: options.sort2 || 'relevance',
@@ -149,7 +149,7 @@ export class EasynewsAPI {
       return json;
     } catch (error) {
       if (error instanceof Error) {
-        if (error.name === 'AbortError') {
+        if (error.name === 'AbortError' || error.name === 'TimeoutError') {
           logger.debug(`Search request timed out for: "${query}"`);
           throw new Error(`Search request for '${query}' timed out after 20 seconds`);
         }

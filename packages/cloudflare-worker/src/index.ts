@@ -82,13 +82,17 @@ app.get('/resolve/:payload/:filename', async c => {
         Range: 'bytes=0-0',
       },
       redirect: 'manual',
+      signal: AbortSignal.timeout(10000),
     });
 
-    // If we got a 3xx (redirect), grab the Location header; otherwise fall back
-    const location = response.headers.get('Location') || cleanUrl;
+    const location = response.headers.get('Location');
+    if (response.body) await response.body.cancel();
+    if (!response.ok && !(response.status >= 300 && response.status < 400 && location)) {
+      return c.text('Unable to resolve stream', 502);
+    }
 
     // Redirect to the final URL
-    return c.redirect(location, 307);
+    return c.redirect(location || cleanUrl, 307);
   } catch (err) {
     logger.error(`Error resolving stream ${cleanUrl}:`, err);
     return c.text('Error resolving stream', 502);

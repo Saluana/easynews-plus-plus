@@ -73,7 +73,7 @@ function serveHTTP(addonInterface: AddonInterface, opts: ServerOptions = {}) {
 
   // Request logging middleware
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    logger.debug(`Received ${req.method} request for: ${req.originalUrl || req.url}`);
+    logger.debug(`Received ${req.method} request`);
     next();
   });
 
@@ -147,10 +147,16 @@ function serveHTTP(addonInterface: AddonInterface, opts: ServerOptions = {}) {
       // Redirect client to the real CDN URL
       (upstream: IncomingMessage & { responseUrl?: string }) => {
         const finalUrl = upstream.responseUrl || cleanUrl;
+        upstream.resume();
+        if (upstream.statusCode && upstream.statusCode >= 400) {
+          res.status(502).send('Unable to resolve stream');
+          return;
+        }
         res.redirect(307, finalUrl);
       }
     );
 
+    request.setTimeout(10000, () => request.destroy(new Error('Stream resolution timed out')));
     request.on('error', (err: Error) => {
       logger.error(`Error resolving stream ${cleanUrl}:`, err);
       res.status(502).send('Error resolving stream');

@@ -340,9 +340,7 @@ export function createStreamUrl(
   if (!baseUrl) {
     // Legacy mode: credentials in URL
     const url = `${downURL.replace('https://', `https://${username}:${password}@`)}/${dlFarm}/${dlPort}/${filePath}`;
-    logger.debug(
-      `Stream URL created: ${url.substring(0, url.indexOf('@') + 1)}***/${dlFarm}/${dlPort}/${filePath}`
-    );
+    logger.debug('Stream URL created for legacy playback');
     return url;
   } else {
     // Resolve mode: route via addon

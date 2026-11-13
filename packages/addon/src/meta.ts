@@ -18,6 +18,8 @@ export type MetaProviderResponse = {
   tmdbId?: string | null; // Add TMDB ID for fetching translations
 };
 
+const metadataFetch = (url: string) => fetch(url, { signal: AbortSignal.timeout(5000) });
+
 // API Key for TMDB - should be added to environment variables in a production app
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 
@@ -72,7 +74,7 @@ async function getTMDBTranslatedTitle(
 
   try {
     // First, we need to find the TMDB ID from the IMDb ID
-    const findResponse = await fetch(
+    const findResponse = await metadataFetch(
       `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
     );
 
@@ -107,7 +109,7 @@ async function getTMDBTranslatedTitle(
       ? `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&language=${tmdbLangCode}`
       : `https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}&language=${tmdbLangCode}`;
 
-    const detailsResponse = await fetch(detailsUrl);
+    const detailsResponse = await metadataFetch(detailsUrl);
 
     if (!detailsResponse.ok) {
       logger.error(`TMDB API details error: ${detailsResponse.status}`);
@@ -133,7 +135,7 @@ async function getTMDBTranslatedTitle(
       ? `https://api.themoviedb.org/3/movie/${tmdbId}/translations?api_key=${TMDB_API_KEY}`
       : `https://api.themoviedb.org/3/tv/${tmdbId}/translations?api_key=${TMDB_API_KEY}`;
 
-    const translationsResponse = await fetch(translationsUrl);
+    const translationsResponse = await metadataFetch(translationsUrl);
 
     if (!translationsResponse.ok) {
       logger.error(`TMDB API translations error: ${translationsResponse.status}`);
@@ -172,7 +174,7 @@ async function imdbMetaProvider(
 ): Promise<MetaProviderResponse> {
   var [tt, season, episode] = id.split(':');
 
-  return fetch(`https://v2.sg.media-imdb.com/suggestion/t/${tt}.json`)
+  return metadataFetch(`https://v2.sg.media-imdb.com/suggestion/t/${tt}.json`)
     .then(res => res.json())
     .then(json => {
       return json.d.find((item: { id: string }) => item.id === tt);
@@ -182,8 +184,7 @@ async function imdbMetaProvider(
       const originalName = l;
       const alternativeNames = getAlternativeTitles(originalName);
 
-      // Variable to store the actual TMDB ID if we can retrieve it
-      let tmdbId: string | null = null;
+      const tmdbId: string | null = null;
 
       // If preferred language is provided, try to get a translated title
       if (preferredLanguage && preferredLanguage !== '') {
@@ -201,15 +202,8 @@ async function imdbMetaProvider(
             alternativeNames.push(sanitizedTitle);
             logger.info(`Added sanitized TMDB title: ${sanitizedTitle}`);
           }
-
-          // Try to get the actual TMDB ID
-          tmdbId = await getTMDBId(tt);
         }
-      } else if (useTMDB) {
-        // Even if we don't need translations, try to get the TMDB ID if TMDB is enabled
-        tmdbId = await getTMDBId(tt);
       }
-
       return {
         name: originalName,
         originalName,
@@ -217,46 +211,9 @@ async function imdbMetaProvider(
         year: y,
         season,
         episode,
-        tmdbId, // Use the actual TMDB ID if available
+        tmdbId,
       };
     });
-}
-
-/**
- * Helper function to get TMDB ID from IMDb ID
- */
-async function getTMDBId(imdbId: string): Promise<string | null> {
-  if (!useTMDB) {
-    return null;
-  }
-
-  try {
-    const findResponse = await fetch(
-      `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`
-    );
-
-    if (!findResponse.ok) {
-      logger.error(`TMDB API error: ${findResponse.status}`);
-      return null;
-    }
-
-    const findData = await findResponse.json();
-
-    // Check if we found a movie or TV show
-    const isMovie = findData.movie_results && findData.movie_results.length > 0;
-    const isTVShow = findData.tv_results && findData.tv_results.length > 0;
-
-    if (!isMovie && !isTVShow) {
-      return null;
-    }
-
-    // Get the TMDB ID
-    const tmdbId = isMovie ? findData.movie_results[0].id : findData.tv_results[0].id;
-    return tmdbId.toString();
-  } catch (error) {
-    logger.error(`Error fetching TMDB ID for ${imdbId}: ${error}`);
-    return null;
-  }
 }
 
 async function cinemetaMetaProvider(
@@ -266,7 +223,7 @@ async function cinemetaMetaProvider(
 ): Promise<MetaProviderResponse> {
   var [tt, season, episode] = id.split(':');
 
-  return fetch(`https://v3-cinemeta.strem.io/meta/${type}/${tt}.json`)
+  return metadataFetch(`https://v3-cinemeta.strem.io/meta/${type}/${tt}.json`)
     .then(res => res.json())
     .then(json => {
       const meta = json.meta;
@@ -277,8 +234,7 @@ async function cinemetaMetaProvider(
       const originalName = name;
       const alternativeNames = getAlternativeTitles(originalName);
 
-      // Variable to store the actual TMDB ID if we can retrieve it
-      let tmdbId: string | null = null;
+      const tmdbId: string | null = null;
 
       // If preferred language is provided, try to get a translated title
       if (preferredLanguage && preferredLanguage !== '') {
@@ -296,12 +252,6 @@ async function cinemetaMetaProvider(
               alternativeNames.push(sanitizedTitle);
               logger.debug(`Added sanitized TMDB title: ${sanitizedTitle}`);
             }
-
-            // Try to get the actual TMDB ID
-            tmdbId = await getTMDBId(tt);
-          } else if (useTMDB) {
-            // Even if we don't need translations, try to get the TMDB ID if TMDB is enabled
-            tmdbId = await getTMDBId(tt);
           }
 
           return {
@@ -311,22 +261,7 @@ async function cinemetaMetaProvider(
             year,
             episode,
             season,
-            tmdbId, // Use the actual TMDB ID if available
-          } satisfies MetaProviderResponse;
-        });
-      }
-
-      // If no language preference, still try to get TMDB ID if enabled
-      if (useTMDB) {
-        return getTMDBId(tt).then(id => {
-          return {
-            name,
-            originalName,
-            alternativeNames,
-            year,
-            episode,
-            season,
-            tmdbId: id, // Use the actual TMDB ID if available
+            tmdbId,
           } satisfies MetaProviderResponse;
         });
       }
@@ -346,24 +281,33 @@ async function cinemetaMetaProvider(
 /**
  * Fetches metadata from IMDB and use Cinemeta as a fallback.
  */
+const metadataCache = new Map<string, { value: MetaProviderResponse; expires: number }>();
+const METADATA_CACHE_TTL = 15 * 60 * 1000;
+const MAX_METADATA_CACHE_ENTRIES = 256;
+
 export async function publicMetaProvider(
   id: string,
   type: string,
   preferredLanguage?: string
 ): Promise<MetaProviderResponse> {
-  return imdbMetaProvider(id, preferredLanguage)
-    .then(meta => {
-      if (meta.name) {
-        return meta;
-      }
+  const key = JSON.stringify([id, type, preferredLanguage || '']);
+  const cached = metadataCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.value;
+  if (cached) metadataCache.delete(key);
 
-      return cinemetaMetaProvider(id, type, preferredLanguage);
-    })
-    .then(meta => {
-      if (meta.name) {
-        return meta;
-      }
-
-      throw new Error('Failed to find metadata');
-    });
+  let meta: MetaProviderResponse;
+  try {
+    meta = await imdbMetaProvider(id, preferredLanguage);
+    if (!meta.name) throw new Error('IMDb metadata has no name');
+  } catch (error) {
+    logger.warn(`IMDb metadata unavailable, using Cinemeta: ${error}`);
+    meta = await cinemetaMetaProvider(id, type, preferredLanguage);
+  }
+  if (!meta.name) throw new Error('Failed to find metadata');
+  if (metadataCache.size >= MAX_METADATA_CACHE_ENTRIES) {
+    const oldest = metadataCache.keys().next().value;
+    if (oldest !== undefined) metadataCache.delete(oldest);
+  }
+  metadataCache.set(key, { value: meta, expires: Date.now() + METADATA_CACHE_TTL });
+  return meta;
 }

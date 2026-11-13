@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { manifest } from '../src/manifest';
+import { EasynewsAPI } from 'easynews-plus-plus-api';
 
 // Mocking needs to happen before imports
 vi.mock('../src/manifest', () => ({
@@ -32,7 +33,7 @@ vi.mock('../src/utils', () => ({
 }));
 
 vi.mock('easynews-plus-plus-api', () => ({
-  EasynewsAPI: vi.fn().mockImplementation(() => ({
+  EasynewsAPI: vi.fn().mockImplementation(function () { return {
     search: vi.fn().mockResolvedValue({
       data: [
         {
@@ -51,7 +52,7 @@ vi.mock('easynews-plus-plus-api', () => ({
         },
       ],
     }),
-  })),
+  }; }),
 }));
 
 vi.mock('../src/meta', () => ({
@@ -77,7 +78,7 @@ vi.mock('../src/i18n', () => ({
 
 vi.mock('stremio-addon-sdk/src/builder', () => {
   return {
-    default: vi.fn().mockImplementation(() => ({
+    default: vi.fn().mockImplementation(function () { return {
       defineStreamHandler: vi.fn().mockImplementation(handler => {
         // Store the handler for testing
         (global as any).streamHandler = handler;
@@ -89,7 +90,7 @@ vi.mock('stremio-addon-sdk/src/builder', () => {
           handler: (global as any).streamHandler,
         },
       }),
-    })),
+    }; }),
   };
 });
 
@@ -227,5 +228,43 @@ describe('Addon', () => {
     // Verify the result
     expect(result).toHaveProperty('streams');
     expect(Array.isArray(result.streams)).toBe(true);
+  });
+
+  it('continues to later pages when earlier results exceed the size limit', async () => {
+    const previousLimit = process.env.TOTAL_MAX_RESULTS;
+    process.env.TOTAL_MAX_RESULTS = '1';
+    const search = vi.fn(async ({ pageNr }: { pageNr: number }) => ({
+      data: [{
+        '0': pageNr === 1 ? 'oversized' : 'allowed',
+        '5': '2023-01-01',
+        fullres: '1920x1080',
+        alangs: ['eng'],
+        rawSize: (pageNr === 1 ? 3 : 1) * 1024 ** 3,
+      }],
+    }));
+    vi.mocked(EasynewsAPI).mockImplementationOnce(function () {
+      return { search } as any;
+    });
+    try {
+      const result = await (global as any).streamHandler({
+        id: 'tt1234567', type: 'movie',
+        config: { username: 'testuser', password: 'testpass', maxFileSize: '2' },
+      });
+      expect(result.streams).toHaveLength(1);
+      expect(result.streams[0].url).toBe('https://easynews.com/stream');
+      expect(search.mock.calls.some(([options]) => options.pageNr === 2)).toBe(true);
+    } finally {
+      if (previousLimit === undefined) delete process.env.TOTAL_MAX_RESULTS;
+      else process.env.TOTAL_MAX_RESULTS = previousLimit;
+    }
+  });
+
+  it('shows a useful message when every stream is excluded by the size limit', async () => {
+    const result = await (global as any).streamHandler({
+      id: 'tt1234567', type: 'movie',
+      config: { username: 'testuser', password: 'testpass', maxFileSize: '0.1' },
+    });
+    expect(result.streams).toHaveLength(1);
+    expect(result.streams[0].name).toBe('Easynews++ No matching streams');
   });
 });

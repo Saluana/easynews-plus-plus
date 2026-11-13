@@ -7,7 +7,13 @@ function landingTemplate(manifest: Manifest): string {
 
   // Find UI language field to determine which language to use
   const uiLanguageField = configurationFields.find((field: any) => field.key === 'uiLanguage');
-  const defaultUILanguage = uiLanguageField?.default || 'eng';
+  const requestedLanguage = uiLanguageField?.default;
+  const defaultUILanguage =
+    typeof requestedLanguage === 'string' &&
+    Object.prototype.hasOwnProperty.call(ISO_TO_LANGUAGE, requestedLanguage) &&
+    requestedLanguage !== ''
+      ? requestedLanguage
+      : 'eng';
 
   // Get translations based on the default UI language
   const translations = getTranslations(defaultUILanguage);
@@ -990,6 +996,7 @@ function landingTemplate(manifest: Manifest): string {
       
       // Handle all form fields including checkboxes
       document.querySelectorAll('input, select').forEach(field => {
+        if (field.name === 'username' || field.name === 'password') return;
         if (field.type === 'checkbox') {
           config[field.name] = field.checked ? 'true' : 'false';
         } else {
@@ -1046,10 +1053,11 @@ function landingTemplate(manifest: Manifest): string {
       if (savedValues) {
         try {
           const values = JSON.parse(savedValues);
-          logger.debug('Restoring saved values:', values);
+          logger.debug('Restoring saved preferences');
           
           // Fill in the form
           Object.entries(values).forEach(([key, value]) => {
+            if (key === 'username' || key === 'password') return;
             const field = document.getElementById(key) || document.querySelector('input[name="' + key + '"]');
             if (field) {
               if (field.type === 'checkbox') {

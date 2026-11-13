@@ -1,4 +1,4 @@
-import { Cache, ContentType } from 'stremio-addon-sdk';
+import { ContentType } from 'stremio-addon-sdk';
 import addonBuilder from 'stremio-addon-sdk/src/builder';
 import { manifest } from './manifest';
 import {
@@ -60,6 +60,11 @@ function authErrorStream(langCode: string) {
   };
 }
 
+function errorStream(title: string, message: string) {
+  return { streams: [{ name: `Easynews++ ${title}`, description: message,
+    url: 'https://example.com/error', behaviorHints: { notWebReady: true } }] };
+}
+
 // Default configuration values
 const DEFAULT_CONFIG = {
   strictTitleMatching: 'true',
@@ -71,27 +76,6 @@ const DEFAULT_CONFIG = {
 };
 
 const builder = new addonBuilder(manifest);
-
-// In-memory request cache to reduce API calls and improve response times
-const requestCache = new Map<string, { data: any; timestamp: number }>();
-const CACHE_TTL = 1000 * 60 * 30; // 30 minutes
-
-function getFromCache<T>(key: string): T | null {
-  const cached = requestCache.get(key);
-  if (!cached) return null;
-
-  const now = Date.now();
-  if (now - cached.timestamp > CACHE_TTL) {
-    requestCache.delete(key);
-    return null;
-  }
-
-  return cached.data as T;
-}
-
-function setCache<T>(key: string, data: T): void {
-  requestCache.set(key, { data, timestamp: Date.now() });
-}
 
 // Load custom titles
 let titlesFromFile: Record<string, string[]> = {};
@@ -150,17 +134,6 @@ builder.defineStreamHandler(
       return {
         streams: [],
       };
-    }
-
-    // Include settings in cache key to ensure
-    // users with different settings get different cache results
-    const cacheKey = `${id}:v3:user=${username}:strict=${strictTitleMatching === 'on' || strictTitleMatching === 'true'}:lang=${preferredLanguage || ''}:sort=${sortingPreference}:qualities=${showQualities || ''}:maxPerQuality=${maxResultsPerQuality || ''}:maxSize=${maxFileSize || ''}`;
-
-    logger.debug(`Cache key: ${cacheKey}`);
-    const cached = getFromCache<{ streams: Stream[] }>(cacheKey);
-
-    if (cached) {
-      return cached;
     }
 
     try {
@@ -261,7 +234,13 @@ builder.defineStreamHandler(
         `API Sorting: ${sortOptions.sort1} (${sortOptions.sort1Direction}), ${sortOptions.sort2} (${sortOptions.sort2Direction}), ${sortOptions.sort3} (${sortOptions.sort3Direction})`
       );
 
-      const meta = await publicMetaProvider(id, type, preferredLanguage);
+      let meta;
+      try {
+        meta = await publicMetaProvider(id, type, preferredLanguage);
+      } catch (error) {
+        logger.error('Metadata lookup failed:', error);
+        return errorStream('Metadata unavailable', 'Could not retrieve title information. Please try again.');
+      }
       logger.info(`Searching for: ${meta.name}`);
 
       // Check if we have a custom title for this title directly
@@ -329,162 +308,16 @@ builder.defineStreamHandler(
 
       logger.debug(`Will search for ${allTitles.length} titles: ${allTitles.join(', ')}`);
 
-      // Store all search results here
-      const allSearchResults: {
-        query: string;
-        result: EasynewsSearchResponse;
-      }[] = [];
-
-      // Early exit condition - limit API calls
-      const TOTAL_MAX_RESULTS = parseInt(process.env.TOTAL_MAX_RESULTS || '500');
-      let totalFoundResults = 0;
-
-      // Helper function to count total unique results across all searches
-      const countTotalUniqueResults = () => {
-        const uniqueHashes = new Set<string>();
-        for (const { result } of allSearchResults) {
-          for (const file of result.data ?? []) {
-            const fileHash = file['0'];
-            uniqueHashes.add(fileHash);
-          }
-        }
-        return uniqueHashes.size;
-      };
-
-      // First try without year for each title variant
-      for (const titleVariant of allTitles) {
-        // Skip empty titles
-        if (!titleVariant.trim()) continue;
-
-        // Stop searching if we already have enough results
-        if (totalFoundResults >= TOTAL_MAX_RESULTS) {
-          logger.debug(
-            `Already found ${totalFoundResults} unique results, skipping additional title searches`
-          );
-          break;
-        }
-
-        const titleMeta = { ...meta, name: titleVariant, year: undefined };
-        const query = buildSearchQuery(type, titleMeta);
-        logger.debug(`Searching without year for: "${query}"`);
-
-        try {
-          const res = await api.search({
-            ...sortOptions,
-            query,
-          });
-
-          const resultCount = res?.data?.length || 0;
-          logger.debug(`Found ${resultCount} results for "${query}" without year`);
-
-          if (resultCount > 0) {
-            allSearchResults.push({ query, result: res });
-            totalFoundResults = countTotalUniqueResults();
-            logger.debug(`Total unique results so far: ${totalFoundResults}`);
-
-            // Log a few examples of the results
-            const examples = res.data.slice(0, 2);
-            for (const file of examples) {
-              const title = getPostTitle(file);
-              logger.debug(`Example result: "${title}" (${file['4'] || 'unknown size'})`);
-            }
-          }
-        } catch (error) {
-          logger.error(`Error searching for "${query}":`, error);
-
-          // Check if it's an authentication error
-          if (isAuthError(error)) return authErrorStream(config.preferredLanguage || '');
-
-          // Continue with other titles even if one fails
-        }
-      }
-
-      // If meta.year is defined, also search with year included (regardless of whether we found results without year)
-      if (meta.year !== undefined) {
-        // Skip year search if we already have enough results
-        if (totalFoundResults >= TOTAL_MAX_RESULTS) {
-          logger.debug(
-            `Already found ${totalFoundResults} unique results, skipping year-based searches`
-          );
-        } else {
-          // If we already found results without year, log that we're still searching with year
-          if (allSearchResults.length > 0) {
-            logger.debug(
-              `Found ${totalFoundResults} unique results without year, also trying with year: ${meta.year}`
-            );
-          } else {
-            logger.debug(`No results found without year, trying with year: ${meta.year}`);
-          }
-
-          for (const titleVariant of allTitles) {
-            // Skip empty titles
-            if (!titleVariant.trim()) continue;
-
-            // Stop searching if we already have enough results
-            if (totalFoundResults >= TOTAL_MAX_RESULTS) {
-              logger.debug(
-                `Already found ${totalFoundResults} unique results, skipping additional title searches with year`
-              );
-              break;
-            }
-
-            const titleMeta = { ...meta, name: titleVariant, year: meta.year };
-            const query = buildSearchQuery(type, titleMeta);
-            logger.debug(`Searching with year for: "${query}"`);
-
-            try {
-              const res = await api.search({
-                ...sortOptions,
-                query,
-              });
-
-              const resultCount = res?.data?.length || 0;
-              logger.debug(`Found ${resultCount} results for "${query}" with year`);
-
-              if (resultCount > 0) {
-                allSearchResults.push({ query, result: res });
-                totalFoundResults = countTotalUniqueResults();
-                logger.debug(`Total unique results so far: ${totalFoundResults}`);
-
-                // Log a few examples of the results
-                const examples = res.data.slice(0, 2);
-                for (const file of examples) {
-                  const title = getPostTitle(file);
-                  logger.debug(`Example result: "${title}" (${file['4'] || 'unknown size'})`);
-                }
-              }
-            } catch (error) {
-              logger.error(`Error searching for "${query}":`, error);
-
-              // Check if it's an authentication error
-              if (isAuthError(error)) return authErrorStream(config.preferredLanguage || '');
-
-              // Continue with other titles even if one fails
-            }
-          }
-        }
-      }
-
-      if (allSearchResults.length === 0) {
-        return { streams: [] };
-      }
-
+      const TOTAL_MAX_RESULTS = parseInt(process.env.TOTAL_MAX_RESULTS || '500', 10);
+      const MAX_PAGES = parseInt(process.env.MAX_PAGES || '10', 10);
       const processedHashes = new Set<string>();
-
-      // Store all streams here
+      const seenQueries = new Set<string>();
       let streams: Stream[] = [];
+      let successfulSearches = 0;
+      let failedSearches = 0;
+      let rejectedByFilters = 0;
 
-      // Apply global limit across all search results
-      logger.debug(`Global stream limit: ${TOTAL_MAX_RESULTS} results across all searches`);
-
-      // Process each search result
-      for (const { query, result: res } of allSearchResults) {
-        // Skip adding more results if we've already reached the limit
-        if (streams.length >= TOTAL_MAX_RESULTS) {
-          logger.debug(`Reached global limit of ${TOTAL_MAX_RESULTS} streams, stopping processing`);
-          break;
-        }
-
+      const processResult = (res: EasynewsSearchResponse) => {
         for (const file of res.data ?? []) {
           // Check if we've reached the global limit
           if (streams.length >= TOTAL_MAX_RESULTS) {
@@ -500,8 +333,6 @@ builder.defineStreamHandler(
           if (isBadVideo(file) || processedHashes.has(fileHash)) {
             continue;
           }
-
-          processedHashes.add(fileHash);
 
           // For series there are multiple possible queries that could match the title.
           // We check if at least one of them matches.
@@ -549,8 +380,7 @@ builder.defineStreamHandler(
             continue;
           }
 
-          streams.push(
-            mapStream({
+          const stream = mapStream({
               username,
               password,
               fullResolution: file.fullres,
@@ -568,388 +398,68 @@ builder.defineStreamHandler(
               videoSize: file.rawSize,
               file,
               preferredLang,
-            })
-          );
-        }
-      }
-
-      // Sort streams based on user preference
-      if (sortingPreference === 'language_first' && preferredLang) {
-        logger.debug(`Applying language-first sorting for language: ${preferredLang}`);
-
-        // Special handling for language-first sorting
-        // First, separate streams by language
-        const preferredLangStreams: Stream[] = [];
-        const otherStreams: Stream[] = [];
-
-        // Split streams into two groups
-        for (const stream of streams) {
-          const file = (stream as any)._temp?.file;
-          const hasPreferredLang =
-            file?.alangs && Array.isArray(file.alangs) && file.alangs.includes(preferredLang);
-
-          if (hasPreferredLang) {
-            preferredLangStreams.push(stream);
-          } else {
-            otherStreams.push(stream);
-          }
-        }
-
-        logger.debug(
-          `Found ${preferredLangStreams.length} streams with preferred language and ${otherStreams.length} other streams`
-        );
-
-        // Sort each group by quality and size
-        const sortByQualityAndSize = (a: Stream, b: Stream) => {
-          // Extract quality info
-          const aDesc = a.description?.split('\n') || [];
-          const bDesc = b.description?.split('\n') || [];
-          const aQuality = a.name?.includes('\n') ? a.name.split('\n')[1] : '';
-          const bQuality = b.name?.includes('\n') ? b.name.split('\n')[1] : '';
-
-          // Get quality scores with improved 4K detection
-          const getQualityScore = (quality: string): number => {
-            if (!quality) return 0;
-
-            // Standardize the quality string for comparison
-            const q = quality.toUpperCase();
-
-            // Check for 4K indicators (multiple ways to indicate 4K)
-            if (
-              q.includes('4K') ||
-              q.includes('2160P') ||
-              q.includes('UHD') ||
-              q.includes('2160') ||
-              q.includes('ULTRA HD')
-            )
-              return 4;
-
-            // Check for 1080p
-            if (q.includes('1080P') || q.includes('1080')) return 3;
-
-            // Check for 720p
-            if (q.includes('720P') || q.includes('720')) return 2;
-
-            // Check for 480p/SD
-            if (q.includes('480P') || q.includes('480') || q.includes('SD')) return 1;
-
-            return 0;
-          };
-          const aScore = getQualityScore(aQuality);
-          const bScore = getQualityScore(bQuality);
-
-          // Compare quality scores
-          if (aScore !== bScore) {
-            return bScore - aScore;
-          }
-
-          // Compare sizes
-          const aSize = aDesc.length > 2 ? aDesc[2] : '';
-          const bSize = bDesc.length > 2 ? bDesc[2] : '';
-
-          if (aSize.includes('GB') && bSize.includes('GB')) {
-            const aGB = parseFloat(aSize.match(/[\d.]+/)?.[0] || '0');
-            const bGB = parseFloat(bSize.match(/[\d.]+/)?.[0] || '0');
-            if (aGB > bGB) return -1;
-            if (aGB < bGB) return 1;
-          }
-
-          if (aSize.includes('GB') && bSize.includes('MB')) return -1;
-          if (aSize.includes('MB') && bSize.includes('GB')) return 1;
-
-          if (aSize.includes('MB') && bSize.includes('MB')) {
-            const aMB = parseFloat(aSize.match(/[\d.]+/)?.[0] || '0');
-            const bMB = parseFloat(bSize.match(/[\d.]+/)?.[0] || '0');
-            if (aMB > bMB) return -1;
-            if (aMB < bMB) return 1;
-          }
-
-          return 0;
-        };
-
-        // Sort each group independently
-        preferredLangStreams.sort(sortByQualityAndSize);
-        otherStreams.sort(sortByQualityAndSize);
-
-        // Replace streams array with the concatenated sorted groups
-        streams.length = 0;
-        streams.push(...preferredLangStreams, ...otherStreams);
-      } else {
-        // Original sorting for other preferences
-        streams.sort((a, b) => {
-          // Extract stream data
-          const aFile = (a as any)._temp?.file;
-          const bFile = (b as any)._temp?.file;
-          const aHasPreferredLang = preferredLang && aFile?.alangs?.includes(preferredLang);
-          const bHasPreferredLang = preferredLang && bFile?.alangs?.includes(preferredLang);
-
-          // Extract quality info
-          const aDesc = a.description?.split('\n') || [];
-          const bDesc = b.description?.split('\n') || [];
-          const aQuality = a.name?.includes('\n') ? a.name.split('\n')[1] : '';
-          const bQuality = b.name?.includes('\n') ? b.name.split('\n')[1] : '';
-
-          // Get quality scores with improved 4K detection
-          const getQualityScore = (quality: string): number => {
-            if (!quality) return 0;
-
-            // Standardize the quality string for comparison
-            const q = quality.toUpperCase();
-
-            // Check for 4K indicators (multiple ways to indicate 4K)
-            if (
-              q.includes('4K') ||
-              q.includes('2160P') ||
-              q.includes('UHD') ||
-              q.includes('2160') ||
-              q.includes('ULTRA HD')
-            )
-              return 4;
-
-            // Check for 1080p
-            if (q.includes('1080P') || q.includes('1080')) return 3;
-
-            // Check for 720p
-            if (q.includes('720P') || q.includes('720')) return 2;
-
-            // Check for 480p/SD
-            if (q.includes('480P') || q.includes('480') || q.includes('SD')) return 1;
-
-            return 0;
-          };
-          const aScore = getQualityScore(aQuality);
-          const bScore = getQualityScore(bQuality);
-
-          // Size comparison logic
-          const compareSize = () => {
-            const aSize = aDesc.length > 2 ? aDesc[2] : '';
-            const bSize = bDesc.length > 2 ? bDesc[2] : '';
-
-            // Extract only the size part (before any date information)
-            const aSizePart = aSize.split('📅')[0].trim();
-            const bSizePart = bSize.split('📅')[0].trim();
-
-            if (aSizePart.includes('GB') && bSizePart.includes('GB')) {
-              const aGB = parseFloat(aSizePart.match(/[\d.]+/)?.[0] || '0');
-              const bGB = parseFloat(bSizePart.match(/[\d.]+/)?.[0] || '0');
-              if (aGB > bGB) return -1;
-              if (aGB < bGB) return 1;
-            }
-
-            if (aSizePart.includes('GB') && bSizePart.includes('MB')) return -1;
-            if (aSizePart.includes('MB') && bSizePart.includes('GB')) return 1;
-
-            if (aSizePart.includes('MB') && bSizePart.includes('MB')) {
-              const aMB = parseFloat(aSizePart.match(/[\d.]+/)?.[0] || '0');
-              const bMB = parseFloat(bSizePart.match(/[\d.]+/)?.[0] || '0');
-              if (aMB > bMB) return -1;
-              if (aMB < bMB) return 1;
-            }
-
-            return 0;
-          };
-
-          // Apply sorting based on user preference
-          switch (sortingPreference) {
-            case 'size_first':
-              // Size first, then quality, then language
-              const sizeCompare = compareSize();
-              if (sizeCompare !== 0) {
-                return sizeCompare;
-              }
-              if (aScore !== bScore) {
-                return bScore - aScore;
-              }
-              if (aHasPreferredLang !== bHasPreferredLang) {
-                return aHasPreferredLang ? -1 : 1;
-              }
-              return 0;
-
-            case 'date_first':
-              // Sort by date first using the file's date info
-              const aDate = aFile?.['5'] ? new Date(aFile['5']).getTime() : 0;
-              const bDate = bFile?.['5'] ? new Date(bFile['5']).getTime() : 0;
-              if (aDate !== bDate) {
-                // Higher date value (more recent) comes first - descending order
-                return bDate - aDate;
-              }
-              // Then quality
-              if (aScore !== bScore) {
-                return bScore - aScore;
-              }
-              // Then language
-              if (aHasPreferredLang !== bHasPreferredLang) {
-                return aHasPreferredLang ? -1 : 1;
-              }
-              // Then size
-              return compareSize();
-
-            case 'lang_first':
-            case 'language_first':
-              // Language first, then quality, then size
-              if (aHasPreferredLang !== bHasPreferredLang) {
-                return aHasPreferredLang ? -1 : 1;
-              }
-              if (aScore !== bScore) {
-                return bScore - aScore;
-              }
-              return compareSize();
-
-            case 'quality_first':
-            default:
-              // Quality first (default), then language, then size
-              // Make sure the quality score comparison is working
-              if (aScore !== bScore) {
-                // Higher quality score first - ensure descending order
-                return bScore - aScore;
-              }
-              // Then language
-              if (aHasPreferredLang !== bHasPreferredLang) {
-                return aHasPreferredLang ? -1 : 1;
-              }
-              // Then size
-              return compareSize();
-          }
-        });
-      }
-
-      // After all streams have been collected, first filter and limit them based on user settings
-      const originalCount = streams.length;
-      if (streams.length > 0) {
-        logger.debug(`Starting filters with ${originalCount} streams`);
-
-        // Filter streams by quality
-        const defaultQualitySet = ['4k', '1080p', '720p', '480p'];
-        const isCustomQualityFilter = !(
-          qualityFilters.length === defaultQualitySet.length &&
-          qualityFilters.every(q => defaultQualitySet.includes(q))
-        );
-
-        if (isCustomQualityFilter) {
-          const qualityMap: Record<string, string[]> = {
-            '4k': ['4K', 'UHD', '2160p'],
-            '1080p': ['1080p'],
-            '720p': ['720p'],
-            '480p': ['480p', 'SD'],
-          };
-
-          // Create a list of allowed quality strings
-          const allowedQualityTerms: string[] = [];
-          qualityFilters.forEach(q => {
-            if (qualityMap[q]) {
-              allowedQualityTerms.push(...qualityMap[q]);
-            }
-          });
-
-          logger.debug(`Filtering for qualities: ${qualityFilters.join(', ')}`);
-          logger.debug(`Accepted quality terms: ${allowedQualityTerms.join(', ')}`);
-
-          if (allowedQualityTerms.length > 0) {
-            const filteredStreams = streams.filter(stream => {
-              const quality = stream.name?.split('\n')[1] || '';
-              const matchesQuality = allowedQualityTerms.some(term => quality.includes(term));
-              return matchesQuality;
             });
+          const quality = stream.name?.split('\n')[1] || '';
+          const qualityTerms: Record<string, string[]> = {
+            '4k': ['4K', 'UHD', '2160p'], '1080p': ['1080p'],
+            '720p': ['720p'], '480p': ['480p', 'SD'],
+          };
+          const defaultQualities = ['4k', '1080p', '720p', '480p'];
+          const customQuality = qualityFilters.length !== defaultQualities.length ||
+            !qualityFilters.every(q => defaultQualities.includes(q));
+          if (customQuality && !qualityFilters.some(q => qualityTerms[q]?.some(term => quality.includes(term)))) { rejectedByFilters++; continue; }
+          if (maxFileSizeGB > 0 && typeof file.rawSize === 'number' && file.rawSize > maxFileSizeGB * 1024 ** 3) { rejectedByFilters++; continue; }
+          processedHashes.add(fileHash);
+          streams.push(stream);
+        }
+      };
 
-            // Only update if we found at least one match
-            if (filteredStreams.length > 0) {
-              streams = filteredStreams;
-              logger.debug(`After quality filtering: ${streams.length} streams remain`);
-            } else {
-              logger.warn(`Quality filtering would remove all streams - keeping original results`);
+      const searchTitles = async (year: number | undefined): Promise<boolean> => {
+        const queries = allTitles.filter(title => title.trim())
+          .map(name => buildSearchQuery(type, { ...meta, name, year }))
+          .filter(query => {
+            const key = query.trim().toLowerCase();
+            if (seenQueries.has(key)) return false;
+            seenQueries.add(key);
+            return true;
+          });
+        for (let i = 0; i < queries.length && streams.length < TOTAL_MAX_RESULTS; i += 3) {
+          const batch = queries.slice(i, i + 3);
+          let active = batch.map(query => ({ query, firstHash: undefined as string | undefined }));
+          for (let pageNr = 1; pageNr <= MAX_PAGES && active.length && streams.length < TOTAL_MAX_RESULTS; pageNr++) {
+            const results = await Promise.allSettled(active.map(({ query }) => api.search({ ...sortOptions, query, pageNr })));
+            const next: typeof active = [];
+            for (let j = 0; j < results.length; j++) {
+              const result = results[j];
+              const current = active[j];
+              if (result.status === 'rejected') {
+                if (isAuthError(result.reason)) return false;
+                failedSearches++;
+                logger.error(`Error searching for "${current.query}":`, result.reason);
+                continue;
+              }
+              successfulSearches++;
+              const files = result.value.data ?? [];
+              if (!files.length || (pageNr > 1 && files[0]?.['0'] === current.firstHash)) continue;
+              processResult(result.value);
+              next.push({ query: current.query, firstHash: current.firstHash ?? files[0]?.['0'] });
             }
+            active = next;
           }
         }
+        return true;
+      };
 
-        // Filter streams by file size (only if maxFileSizeGB > 0)
-        if (maxFileSizeGB > 0) {
-          const filteredStreams = streams.filter(stream => {
-            const description = stream.description || '';
-            const sizeLine = description.split('\n').find(line => line.includes('📦'));
-
-            if (!sizeLine) return true; // Keep if we can't determine size
-
-            // Extract only the size part (before any date information)
-            const sizePart = sizeLine.split('📅')[0].trim();
-
-            if (sizePart.includes('GB')) {
-              const sizeGB = parseFloat(sizePart.match(/[\d.]+/)?.[0] || '0');
-              return sizeGB <= maxFileSizeGB;
-            }
-
-            if (sizePart.includes('MB')) {
-              const sizeMB = parseFloat(sizePart.match(/[\d.]+/)?.[0] || '0');
-              return sizeMB / 1024 <= maxFileSizeGB;
-            }
-
-            return true; // Keep if we can't parse the size
-          });
-
-          // Only update if we found at least one match
-          if (filteredStreams.length > 0) {
-            streams = filteredStreams;
-            logger.debug(`After max file size filtering: ${streams.length} streams remain`);
-          } else {
-            logger.warn(`File size filtering would remove all streams - keeping original results`);
-          }
-        }
-
-        // Group streams by quality for limiting per quality (only if maxResultsPerQualityValue > 0)
-        if (maxResultsPerQualityValue > 0) {
-          const streamsByQuality: Record<string, Stream[]> = {};
-
-          // Determine quality category for each stream
-          streams.forEach(stream => {
-            const quality = stream.name?.split('\n')[1] || '';
-            let qualityCategory = 'other';
-
-            if (quality.includes('4K') || quality.includes('UHD') || quality.includes('2160p')) {
-              qualityCategory = '4k';
-            } else if (quality.includes('1080p')) {
-              qualityCategory = '1080p';
-            } else if (quality.includes('720p')) {
-              qualityCategory = '720p';
-            } else if (quality.includes('480p') || quality.includes('SD')) {
-              qualityCategory = '480p';
-            }
-
-            if (!streamsByQuality[qualityCategory]) {
-              streamsByQuality[qualityCategory] = [];
-            }
-            streamsByQuality[qualityCategory].push(stream);
-          });
-
-          // Log the distribution of streams by quality
-          Object.entries(streamsByQuality).forEach(([quality, streams]) => {
-            logger.debug(`Quality ${quality}: ${streams.length} streams`);
-          });
-
-          // Apply limits per quality category and rebuild streams array
-          const limitedStreams: Stream[] = [];
-          Object.keys(streamsByQuality).forEach(quality => {
-            const qualityStreams = streamsByQuality[quality];
-            const limitedQualityStreams = qualityStreams.slice(0, maxResultsPerQualityValue);
-            limitedStreams.push(...limitedQualityStreams);
-
-            if (limitedQualityStreams.length < qualityStreams.length) {
-              logger.debug(
-                `Quality ${quality}: Limited from ${qualityStreams.length} to ${limitedQualityStreams.length} streams`
-              );
-            }
-          });
-
-          if (limitedStreams.length > 0) {
-            streams = limitedStreams;
-            logger.debug(
-              `After applying max results per quality: ${streams.length} streams remain`
-            );
-          } else {
-            logger.warn(`Per-quality limiting would remove all streams - keeping original results`);
-          }
-        }
-
-        logger.info(`Filtering complete: ${originalCount} streams → ${streams.length} streams`);
+      if (!(await searchTitles(undefined))) return authErrorStream(config.preferredLanguage || '');
+      if (meta.year !== undefined && streams.length < TOTAL_MAX_RESULTS) {
+        if (!(await searchTitles(meta.year))) return authErrorStream(config.preferredLanguage || '');
       }
+      if (!successfulSearches && failedSearches) {
+        return errorStream('Search unavailable', 'Easynews search failed or timed out. Please try again.');
+      }
+
+      // Filtering happens as results arrive so the search limit counts usable streams.
+      const originalCount = streams.length;
 
       // Now sort the filtered streams based on user preference
       if (sortingPreference === 'language_first' && preferredLang) {
@@ -1187,6 +697,20 @@ builder.defineStreamHandler(
         });
       }
 
+      // Apply per-quality limits after sorting, preserving the selected order.
+      if (maxResultsPerQualityValue > 0) {
+        const qualityCounts: Record<string, number> = {};
+        streams = streams.filter(stream => {
+          const quality = stream.name?.split('\n')[1] || '';
+          const category = quality.includes('4K') || quality.includes('UHD') || quality.includes('2160p')
+            ? '4k' : quality.includes('1080p') ? '1080p' : quality.includes('720p')
+            ? '720p' : quality.includes('480p') || quality.includes('SD') ? '480p' : 'other';
+          const count = qualityCounts[category] || 0;
+          qualityCounts[category] = count + 1;
+          return count < maxResultsPerQualityValue;
+        });
+      }
+
       if (streams.length > 0) {
         const qualitySummary: Record<string, number> = {};
         streams.forEach(stream => {
@@ -1203,9 +727,9 @@ builder.defineStreamHandler(
         logger.info(`Found 0 streams total for ${id}`);
       }
 
-      // Cache the result
-      setCache(cacheKey, { streams, ...getCacheOptions(streams.length) });
-
+      if (!streams.length && (originalCount > 0 || rejectedByFilters > 0)) {
+        return errorStream('No matching streams', 'No streams match your quality and size settings. Adjust your addon configuration.');
+      }
       return { streams };
     } catch (error) {
       logError({
@@ -1217,7 +741,7 @@ builder.defineStreamHandler(
       // Check if the error is related to authentication
       if (isAuthError(error)) return authErrorStream(config.preferredLanguage || '');
 
-      return { streams: [] };
+      return errorStream('Request failed', 'The addon could not complete the request. Please try again.');
     }
   }
 );
@@ -1302,12 +826,6 @@ function getPublishDate(timestamp: number): string {
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
   return `📅 ${diffDays}d`;
-}
-
-function getCacheOptions(itemsLength: number): Partial<Cache> {
-  return {
-    cacheMaxAge: (Math.min(itemsLength, 10) / 10) * 3600 * 24 * 7, // up to 1 week of cache for items
-  };
 }
 
 export const addonInterface = builder.getInterface();
