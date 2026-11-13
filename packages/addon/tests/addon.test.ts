@@ -267,4 +267,37 @@ describe('Addon', () => {
     expect(result.streams).toHaveLength(1);
     expect(result.streams[0].name).toBe('Easynews++ No matching streams');
   });
+
+  it('stops searching once a single selected quality has enough results', async () => {
+    const search = vi.fn(async ({ pageNr }: { pageNr: number }) => ({
+      data: Array.from({ length: 10 }, (_, i) => ({
+        '0': `page-${pageNr}-file-${i}`, '5': '2023-01-01', fullres: '1920x1080',
+        alangs: ['eng'], rawSize: 1024 ** 3,
+      })),
+    }));
+    vi.mocked(EasynewsAPI).mockImplementationOnce(function () { return { search } as any; });
+    const result = await (global as any).streamHandler({
+      id: 'tt1234567', type: 'movie',
+      config: { username: 'testuser', password: 'testpass', showQualities: '1080p', maxResultsPerQuality: '10', maxFileSize: '6' },
+    });
+    expect(result.streams).toHaveLength(10);
+    expect(search.mock.calls.every(([options]) => options.pageNr === 1)).toBe(true);
+  });
+
+  it('returns available streams after a second page when a selected quality is unavailable', async () => {
+    const search = vi.fn(async ({ pageNr }: { pageNr: number }) => ({
+      data: Array.from({ length: 10 }, (_, i) => ({
+        '0': `page-${pageNr}-file-${i}`, '5': '2023-01-01', fullres: '1920x1080',
+        alangs: ['eng'], rawSize: 1024 ** 3,
+      })),
+    }));
+    vi.mocked(EasynewsAPI).mockImplementationOnce(function () { return { search } as any; });
+    const result = await (global as any).streamHandler({
+      id: 'tt1234567', type: 'movie',
+      config: { username: 'testuser', password: 'testpass', showQualities: '4k,1080p,720p', maxResultsPerQuality: '10', maxFileSize: '6' },
+    });
+    expect(result.streams).toHaveLength(10);
+    expect(search.mock.calls.some(([options]) => options.pageNr === 2)).toBe(true);
+    expect(search.mock.calls.every(([options]) => options.pageNr <= 2)).toBe(true);
+  });
 });

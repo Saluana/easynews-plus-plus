@@ -65,6 +65,13 @@ function errorStream(title: string, message: string) {
     url: 'https://example.com/error', behaviorHints: { notWebReady: true } }] };
 }
 
+function qualityCategory(stream: Stream): string {
+  const quality = stream.name?.split('\n')[1] || '';
+  return quality.includes('4K') || quality.includes('UHD') || quality.includes('2160p')
+    ? '4k' : quality.includes('1080p') ? '1080p' : quality.includes('720p')
+    ? '720p' : quality.includes('480p') || quality.includes('SD') ? '480p' : 'other';
+}
+
 // Default configuration values
 const DEFAULT_CONFIG = {
   strictTitleMatching: 'true',
@@ -316,6 +323,11 @@ builder.defineStreamHandler(
       let successfulSearches = 0;
       let failedSearches = 0;
       let rejectedByFilters = 0;
+      const foundByQuality: Record<string, number> = {};
+      const selectedQualities = [...new Set(qualityFilters.filter(q =>
+        ['4k', '1080p', '720p', '480p'].includes(q)
+      ))];
+      let enoughResults = false;
 
       const processResult = (res: EasynewsSearchResponse) => {
         for (const file of res.data ?? []) {
@@ -411,6 +423,8 @@ builder.defineStreamHandler(
           if (maxFileSizeGB > 0 && typeof file.rawSize === 'number' && file.rawSize > maxFileSizeGB * 1024 ** 3) { rejectedByFilters++; continue; }
           processedHashes.add(fileHash);
           streams.push(stream);
+          const category = qualityCategory(stream);
+          foundByQuality[category] = (foundByQuality[category] || 0) + 1;
         }
       };
 
@@ -423,10 +437,10 @@ builder.defineStreamHandler(
             seenQueries.add(key);
             return true;
           });
-        for (let i = 0; i < queries.length && streams.length < TOTAL_MAX_RESULTS; i += 3) {
+        for (let i = 0; i < queries.length && streams.length < TOTAL_MAX_RESULTS && !enoughResults; i += 3) {
           const batch = queries.slice(i, i + 3);
           let active = batch.map(query => ({ query, firstHash: undefined as string | undefined }));
-          for (let pageNr = 1; pageNr <= MAX_PAGES && active.length && streams.length < TOTAL_MAX_RESULTS; pageNr++) {
+          for (let pageNr = 1; pageNr <= MAX_PAGES && active.length && streams.length < TOTAL_MAX_RESULTS && !enoughResults; pageNr++) {
             const results = await Promise.allSettled(active.map(({ query }) => api.search({ ...sortOptions, query, pageNr })));
             const next: typeof active = [];
             for (let j = 0; j < results.length; j++) {
@@ -444,6 +458,13 @@ builder.defineStreamHandler(
               processResult(result.value);
               next.push({ query: current.query, firstHash: current.firstHash ?? files[0]?.['0'] });
             }
+            if (maxResultsPerQualityValue > 0 && selectedQualities.length > 0) {
+              const counts = selectedQualities.map(q => Math.min(foundByQuality[q] || 0, maxResultsPerQualityValue));
+              const allQualitiesFull = counts.every(count => count >= maxResultsPerQualityValue);
+              const availableResults = counts.reduce((sum, count) => sum + count, 0);
+              // Give scarce qualities a second page, then return useful choices promptly.
+              enoughResults = allQualitiesFull || (pageNr >= 2 && availableResults >= maxResultsPerQualityValue);
+            }
             active = next;
           }
         }
@@ -451,7 +472,7 @@ builder.defineStreamHandler(
       };
 
       if (!(await searchTitles(undefined))) return authErrorStream(config.preferredLanguage || '');
-      if (meta.year !== undefined && streams.length < TOTAL_MAX_RESULTS) {
+      if (meta.year !== undefined && streams.length < TOTAL_MAX_RESULTS && !enoughResults) {
         if (!(await searchTitles(meta.year))) return authErrorStream(config.preferredLanguage || '');
       }
       if (!successfulSearches && failedSearches) {
@@ -701,10 +722,7 @@ builder.defineStreamHandler(
       if (maxResultsPerQualityValue > 0) {
         const qualityCounts: Record<string, number> = {};
         streams = streams.filter(stream => {
-          const quality = stream.name?.split('\n')[1] || '';
-          const category = quality.includes('4K') || quality.includes('UHD') || quality.includes('2160p')
-            ? '4k' : quality.includes('1080p') ? '1080p' : quality.includes('720p')
-            ? '720p' : quality.includes('480p') || quality.includes('SD') ? '480p' : 'other';
+          const category = qualityCategory(stream);
           const count = qualityCounts[category] || 0;
           qualityCounts[category] = count + 1;
           return count < maxResultsPerQualityValue;
