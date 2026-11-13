@@ -3,6 +3,7 @@ import { getRouter } from 'hono-stremio';
 import { addonInterface, customTemplate } from 'easynews-plus-plus-addon';
 import { getUILanguage } from 'easynews-plus-plus-addon/dist/i18n';
 import { createLogger } from 'easynews-plus-plus-shared';
+import { ExpiredStreamLink, extractEasynewsUrl, genericFilename, importStreamLinkKey, openStreamLink, sealStreamLink } from './stream-links';
 
 // Create a logger with CF prefix for better context and set Cloudflare environment
 const logger = createLogger({ prefix: 'CF', isCloudflare: true });
@@ -39,31 +40,55 @@ function createManifestWithLanguage(lang: string) {
   return manifest;
 }
 
-// Add resolve endpoint for stream requests
-app.get('/resolve/:payload/:filename', async c => {
-  // Expect a Base64URL-encoded URL in the payload
-  const encodedUrl = c.req.param('payload');
-  if (!encodedUrl) {
-    return c.text('Missing url parameter', 400);
+// Encrypt addon-generated stream links before the response leaves the Worker.
+app.use('*', async (c, next) => {
+  if (!/\/stream\/(?:movie|series)\/[^/]+(?:\/[^/]+)?\.json$/.test(new URL(c.req.url).pathname)) {
+    return next();
   }
-
-  let targetUrl: string;
+  let key: CryptoKey;
   try {
-    // Decode the Base64URL payload back into the Easynews URL with credentials as query-params
-    targetUrl = Buffer.from(encodedUrl, 'base64url').toString('utf-8');
+    key = await importStreamLinkKey((c.env as Record<string, unknown>)?.STREAM_LINK_KEY);
   } catch {
-    return c.text('Invalid url encoding', 400);
+    return c.json({ error: 'Stream link encryption is not configured' }, 503, { 'Cache-Control': 'no-store' });
+  }
+  await next();
+  if (!c.res.ok) return;
+  try {
+    const body = await c.res.json() as { streams?: Array<{ url?: string }>; cacheMaxAge?: number; staleRevalidate?: number; staleError?: number };
+    if (!Array.isArray(body.streams)) throw new Error('Invalid stream response');
+    const origin = new URL(c.req.url).origin;
+    await Promise.all(body.streams.map(async stream => {
+      if (!stream.url) return;
+      const target = extractEasynewsUrl(stream.url);
+      if (!target) return; // Addon error placeholder, not a playback URL.
+      const token = await sealStreamLink(target, key);
+      stream.url = `${origin}/resolve/${token}/${genericFilename(target)}`;
+    }));
+    delete body.cacheMaxAge;
+    delete body.staleRevalidate;
+    delete body.staleError;
+    const headers = new Headers(c.res.headers);
+    headers.set('Cache-Control', 'no-store');
+    headers.delete('Content-Length');
+    c.res = new Response(JSON.stringify(body), { status: c.res.status, headers });
+    c.header('Cache-Control', 'no-store');
+  } catch {
+    c.res = c.json({ error: 'Unable to protect stream links' }, 500, { 'Cache-Control': 'no-store' });
+    c.header('Cache-Control', 'no-store');
+  }
+});
+
+// Only authenticated, unexpired encrypted tokens are accepted.
+app.get('/resolve/:payload/:filename', async c => {
+  let parsed: URL;
+  try {
+    const key = await importStreamLinkKey((c.env as Record<string, unknown>)?.STREAM_LINK_KEY);
+    parsed = await openStreamLink(c.req.param('payload'), key);
+  } catch (err) {
+    if (err instanceof ExpiredStreamLink) return c.text('Stream link expired; refresh the stream list', 410, { 'Cache-Control': 'no-store' });
+    return c.text('Invalid stream link', 400, { 'Cache-Control': 'no-store' });
   }
 
-  // Only accept hosts under easynews.com
-  const parsed = new URL(targetUrl);
-  const host = parsed.hostname.toLowerCase();
-  const allowedDomain = /^([a-z0-9-]+\.)*easynews\.com$/i;
-  if (!allowedDomain.test(host)) {
-    return c.text('Domain not allowed', 403);
-  }
-
-  // Extract and remove credentials
   const username = parsed.searchParams.get('u') || '';
   const password = parsed.searchParams.get('p') || '';
   parsed.searchParams.delete('u');
@@ -71,31 +96,23 @@ app.get('/resolve/:payload/:filename', async c => {
   const cleanUrl = parsed.toString();
 
   try {
-    // Create authorization header
     const auth = 'Basic ' + btoa(`${username}:${password}`);
-
-    // Single GET with Range header to follow redirects and only download 1 byte
     const response = await fetch(cleanUrl, {
       method: 'GET',
-      headers: {
-        Authorization: auth,
-        Range: 'bytes=0-0',
-      },
+      headers: { Authorization: auth, Range: 'bytes=0-0' },
       redirect: 'manual',
       signal: AbortSignal.timeout(10000),
     });
-
     const location = response.headers.get('Location');
     if (response.body) await response.body.cancel();
     if (!response.ok && !(response.status >= 300 && response.status < 400 && location)) {
-      return c.text('Unable to resolve stream', 502);
+      return c.text('Unable to resolve stream', 502, { 'Cache-Control': 'no-store' });
     }
-
-    // Redirect to the final URL
+    c.header('Cache-Control', 'no-store');
     return c.redirect(location || cleanUrl, 307);
-  } catch (err) {
-    logger.error(`Error resolving stream ${cleanUrl}:`, err);
-    return c.text('Error resolving stream', 502);
+  } catch {
+    logger.error('Error resolving stream');
+    return c.text('Error resolving stream', 502, { 'Cache-Control': 'no-store' });
   }
 });
 

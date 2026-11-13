@@ -209,6 +209,15 @@ $ npm run deploy:cf
 $ npm run preview:cf
 ```
 
+After the first deployment, create the secret used to encrypt stream links:
+
+```bash
+cd packages/cloudflare-worker
+node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" | npx --no-install wrangler secret put STREAM_LINK_KEY
+```
+
+Create the secret once per Worker and keep it across deployments. Rotating it invalidates all existing stream links. Links expire after 24 hours; if a cached link expires, refresh the stream list. Older unencrypted links are rejected after this update. The configured addon URL can still contain Easynews credentials and must be kept private.
+
 #### Beamup Deployment
 
 ```bash
