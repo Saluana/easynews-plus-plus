@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { manifest } from '../src/manifest';
 import { EasynewsAPI } from 'easynews-plus-plus-api';
+import * as utils from '../src/utils';
+import { publicMetaProvider } from '../src/meta';
 
 // Mocking needs to happen before imports
 vi.mock('../src/manifest', () => ({
@@ -299,5 +301,35 @@ describe('Addon', () => {
     expect(result.streams).toHaveLength(10);
     expect(search.mock.calls.some(([options]) => options.pageNr === 2)).toBe(true);
     expect(search.mock.calls.every(([options]) => options.pageNr <= 2)).toBe(true);
+  });
+
+  it('returns only streams matching the requested series episode', async () => {
+    const actual = await vi.importActual<typeof import('../src/utils')>('../src/utils');
+    const previousMatch = vi.mocked(utils.matchesTitle).getMockImplementation();
+    const previousQuery = vi.mocked(utils.buildSearchQuery).getMockImplementation();
+    const previousTitle = vi.mocked(utils.getPostTitle).getMockImplementation();
+    vi.mocked(utils.matchesTitle).mockImplementation(actual.matchesTitle);
+    vi.mocked(utils.buildSearchQuery).mockImplementation(actual.buildSearchQuery);
+    vi.mocked(utils.getPostTitle).mockImplementation(file => file['10']);
+    vi.mocked(publicMetaProvider).mockResolvedValueOnce({ name: 'Superjail', season: 1, episode: 1 } as any);
+    const search = vi.fn(async ({ pageNr }: { pageNr: number }) => ({
+      data: pageNr === 1 ? [
+        { '0': 'wrong', '10': 'Superjail S01E00 1080p', rawSize: 1024 ** 3, fullres: '1920x1080' },
+        { '0': 'right', '10': 'Superjail S01E01 1080p', rawSize: 1024 ** 3, fullres: '1920x1080' },
+      ] : [],
+    }));
+    vi.mocked(EasynewsAPI).mockImplementationOnce(function () { return { search } as any; });
+    try {
+      const result = await (global as any).streamHandler({
+        id: 'tt1234567:1:1', type: 'series',
+        config: { username: 'testuser', password: 'testpass', strictTitleMatching: 'true' },
+      });
+      expect(result.streams).toHaveLength(1);
+      expect(result.streams[0].description).toContain('Superjail S01E01');
+    } finally {
+      if (previousMatch) vi.mocked(utils.matchesTitle).mockImplementation(previousMatch);
+      if (previousQuery) vi.mocked(utils.buildSearchQuery).mockImplementation(previousQuery);
+      if (previousTitle) vi.mocked(utils.getPostTitle).mockImplementation(previousTitle);
+    }
   });
 });

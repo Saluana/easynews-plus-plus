@@ -136,91 +136,51 @@ export function matchesTitle(title: string, query: string, strict: boolean) {
   const sanitizedQuery = sanitizeTitle(query);
   const sanitizedTitle = sanitizeTitle(title);
 
-  // Extract the main title part for comparison (excluding episode info)
-  const mainQueryPart = sanitizedQuery.split(/s\d+e\d+/i)[0].trim();
-  const isSeriesQuery = /s\d+e\d+/i.test(sanitizedQuery);
-  logger.debug(`Main query part: "${mainQueryPart}", is series query: ${isSeriesQuery}`);
+  // Series results must identify both the show and the requested episode.
+  // Work with the original filename so ranges retain their hyphens.
+  const requested = query.match(/\bs(\d{1,3})e(\d{1,3})(?!\d)/i);
+  if (requested && requested.index !== undefined) {
+    const requestedSeason = Number(requested[1]);
+    const requestedEpisode = Number(requested[2]);
+    const show = sanitizeTitle(query.slice(0, requested.index)).replace(/\s+/g, ' ');
+    const markerPattern = /(?:^|[^a-z0-9])(?:s(\d{1,3})[ ._-]*e(\d{1,3})|(\d{1,3})x(\d{1,3}))(?!\d)/gi;
+    let marker: RegExpExecArray | null;
+    let firstMarkerIndex: number | undefined;
+    let episodeMatches = false;
 
-  // For strict mode, we require an exact title match or proper prefix match
-  if (strict) {
-    // For series with season/episode pattern like S01E01
-    const seasonEpisodePattern = /s\d+e\d+/i;
-    const hasSeasonEpisodePattern = seasonEpisodePattern.test(sanitizedQuery);
-    logger.debug(`Strict mode - has season/episode pattern: ${hasSeasonEpisodePattern}`);
-
-    if (hasSeasonEpisodePattern) {
-      // Split the title into words to make exact word comparisons
-      const titleWords = sanitizedTitle.split(/\s+/);
-      const mainQueryWords = mainQueryPart.split(/\s+/);
-
-      // For exact title matching, ensure one of these conditions is true:
-      // 1. Title is EXACTLY the query
-      // 2. Title is exactly the query plus season/episode info
-      // 3. Title starts with the exact query words followed by season/episode info (possibly with year in between)
-
-      // Check if title is exactly the same as the main query part (case 1)
-      if (sanitizedTitle === mainQueryPart) {
-        logger.debug(`Strict mode - title exactly matches main query part`);
-        return true;
+    while ((marker = markerPattern.exec(title)) !== null) {
+      if (firstMarkerIndex === undefined) firstMarkerIndex = marker.index;
+      const season = Number(marker[1] ?? marker[3]);
+      const firstEpisode = Number(marker[2] ?? marker[4]);
+      const remainder = title.slice(markerPattern.lastIndex);
+      const episodes = [firstEpisode];
+      let rest = remainder;
+      let chained: RegExpMatchArray | null;
+      while ((chained = rest.match(/^[ ._]*e(\d{1,3})(?!\d)/i))) {
+        episodes.push(Number(chained[1]));
+        rest = rest.slice(chained[0].length);
       }
-
-      // Check if title contains season/episode pattern
-      const seMatch = sanitizedTitle.match(seasonEpisodePattern);
-      if (seMatch) {
-        const titleBeforeSE = sanitizedTitle.split(seMatch[0])[0].trim();
-
-        // Check if everything before season/episode is exactly the main query (case 2)
-        if (titleBeforeSE === mainQueryPart) {
-          logger.debug(`Strict mode - title matches main query part + season/episode pattern`);
-          return true;
-        }
-
-        // Remove year from title before comparing
-        const yearPattern = /\b(19\d{2}|20\d{2})\b/;
-        const titleWithoutYear = titleBeforeSE.replace(yearPattern, '').trim();
-
-        // If after removing year, the title matches the query exactly
-        if (titleWithoutYear === mainQueryPart) {
-          logger.debug(`Strict mode - title matches main query part after removing year`);
-          return true;
-        }
-
-        // If title still has more words than query (after removing year), it's not a match
-        // e.g. "grace and frankie s01e01" doesn't match "grace"
-        const titleWordsWithoutYear = titleWithoutYear.split(/\s+/);
-        if (titleWordsWithoutYear.length > mainQueryWords.length) {
-          logger.debug(`Strict mode - title has extra words before season/episode, rejecting`);
-          return false;
-        }
-      } else {
-        // No season/episode in title, reject if it doesn't match the main query exactly
-        logger.debug(`Strict mode - no season/episode pattern in title, rejecting`);
-        return false;
+      const range = rest.match(/^[ ._]*[-–—][ ._]*(?:s(\d{1,3})[ ._-]*)?e?(\d{1,3})(?![a-z0-9])/i);
+      const rangeEnd = range && (!range[1] || Number(range[1]) === season) ? Number(range[2]) : undefined;
+      if (season === requestedSeason && (episodes.includes(requestedEpisode) ||
+          (rangeEnd !== undefined && rangeEnd >= firstEpisode &&
+           requestedEpisode >= firstEpisode && requestedEpisode <= rangeEnd))) {
+        episodeMatches = true;
       }
-
-      // Check if main query is fully contained at the start of the title
-      // First remove year if present to avoid it interfering with word comparison
-      const yearPattern = /\b(19\d{2}|20\d{2})\b/;
-      const titleBeforeSE = sanitizedTitle.split(seasonEpisodePattern)[0].trim();
-      const titleWithoutYear = titleBeforeSE.replace(yearPattern, '').trim();
-      const titleWordsWithoutYear = titleWithoutYear.split(/\s+/);
-
-      const isExactWordMatch = mainQueryWords.every(
-        (word, i) => i < titleWordsWithoutYear.length && titleWordsWithoutYear[i] === word
-      );
-
-      if (!isExactWordMatch) {
-        logger.debug(
-          `Strict mode - query words don't match exactly at beginning of title, rejecting`
-        );
-        return false;
-      }
-
-      // If we've reached here, the title matches the query part exactly and has valid season/episode info
-      logger.debug(`Strict mode - series title matches criteria`);
-      return true;
     }
 
+    if (!episodeMatches || firstMarkerIndex === undefined || !show) return false;
+    const candidate = sanitizeTitle(title.slice(0, firstMarkerIndex)).replace(/\s+/g, ' ');
+    const withoutYear = candidate.replace(/\b(?:19\d{2}|20\d{2})\b/g, '').replace(/\s+/g, ' ').trim();
+    if (strict) return candidate === show || withoutYear === show;
+    // The general loose matcher ignores short words; avoid accepting any show
+    // when the requested title consists entirely of short words.
+    if (!show.split(' ').some(word => word.length > 2)) return candidate === show || withoutYear === show;
+    return matchesTitle(candidate, show, false);
+  }
+
+  // For strict mode, require an exact movie title match.
+  if (strict) {
     // For movies or other non-series content
     const { title: parsedTitle, year } = parseTorrentTitle(title);
     logger.debug(`Strict mode - parsed title: "${parsedTitle}", year: ${year}`);
@@ -278,21 +238,6 @@ export function matchesTitle(title: string, query: string, strict: boolean) {
 
   // Non-strict mode below (original behavior)
   logger.debug(`Non-strict mode matching`);
-
-  // For series with season/episode pattern like S01E01
-  const seasonEpisodePattern = /s\d+e\d+/i;
-  const hasSeasonEpisodePattern = seasonEpisodePattern.test(sanitizedQuery);
-
-  if (hasSeasonEpisodePattern) {
-    // Extract season/episode pattern
-    const seMatch = sanitizedQuery.match(seasonEpisodePattern);
-    if (seMatch && seMatch[0]) {
-      const pattern = seMatch[0].toLowerCase();
-      const result = sanitizedTitle.includes(pattern);
-      logger.debug(`Non-strict mode - checking for pattern "${pattern}" in title: ${result}`);
-      return result;
-    }
-  }
 
   // Check that all words in the query appear in the title
   const queryWords = sanitizedQuery.split(/\s+/);

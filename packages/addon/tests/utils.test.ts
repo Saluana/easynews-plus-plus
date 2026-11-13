@@ -99,6 +99,27 @@ describe('matchesTitle', () => {
     expect(matchesTitle('The Matrix 1999', 'The Matrix 1999', true)).toBe(true);
     expect(matchesTitle('The Matrix 1999', 'The Matrix', true)).toBe(true);
   });
+
+  it.each([
+    ['Superjail S01E01 1080p', 'Superjail S01E01', true],
+    ['Superjail S01E00 1080p', 'Superjail S01E01', false],
+    ['Superjail S02E01 1080p', 'Superjail S01E01', false],
+    ['Superjail S01E01E02 1080p', 'Superjail S01E02', true],
+    ['Superjail S01E01E03 1080p', 'Superjail S01E02', false],
+    ['Superjail S01E01-E03 1080p', 'Superjail S01E02', true],
+    ['Superjail S01E01-S01E03 1080p', 'Superjail S01E02', true],
+    ['Superjail S01E01-1080p', 'Superjail S01E02', false],
+    ['Superjail S01E01-E03 1080p', 'Superjail S01E04', false],
+    ['Superjail 1x02 1080p', 'Superjail S01E02', true],
+    ['Superjail 1x03 1080p', 'Superjail S01E02', false],
+    ['Another Show S01E02 1080p', 'Superjail S01E02', false],
+    ['Superjail (2008) S01E02 1080p', 'Superjail S01E02', true],
+    ['Superjail', 'Superjail S01E02', false],
+    ['It S01E02', 'Up S01E02', false],
+  ])('matches the requested series episode: %s against %s', (title, query, expected) => {
+    expect(matchesTitle(title, query, true)).toBe(expected);
+    expect(matchesTitle(title, query, false)).toBe(expected);
+  });
 });
 
 describe('isBadVideo', () => {

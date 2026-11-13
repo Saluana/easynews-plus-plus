@@ -346,38 +346,7 @@ builder.defineStreamHandler(
             continue;
           }
 
-          // For series there are multiple possible queries that could match the title.
-          // We check if at least one of them matches.
-          if (type === 'series') {
-            // Create queries for all title variants
-            const queries: string[] = [];
-
-            for (const titleVariant of allTitles) {
-              // Add full query with season and episode
-              const fullMeta = {
-                ...meta,
-                name: titleVariant,
-                year: meta.year,
-              };
-              queries.push(buildSearchQuery(type, fullMeta));
-
-              // Add query with episode only
-              const episodeMeta = {
-                name: titleVariant,
-                episode: meta.episode,
-              };
-              queries.push(buildSearchQuery(type, episodeMeta));
-            }
-
-            // Use strictTitleMatching setting if enabled for series
-            if (!queries.some(q => matchesTitle(title, q, useStrictMatching))) {
-              logger.debug(`Rejected series by title matching: "${title}"`);
-              continue;
-            }
-          }
-
-          // For movies, check if title matches any of the query variants
-          // Other content types are loosely matched
+          // Match each title variant using the full requested episode, when present.
           const matchesAnyVariant = allTitles.some(titleVariant => {
             const variantQuery = buildSearchQuery(type, {
               ...meta,
